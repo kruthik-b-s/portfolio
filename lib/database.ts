@@ -1,256 +1,469 @@
 import { supabase } from "./supabase"
+import { Parser } from 'node-sql-parser'
+
+const parser = new Parser();
+
+const MUTATION_ERROR_MSGS = [
+  "Whoa there, cowboy! This is a READ-ONLY zone. Your destructive tendencies are not welcome here.",
+  "Nice try, data destroyer! This isn't a playground where you can break things. SELECT only, please.",
+  "Mutation detected! I'm not your personal database demolition crew.",
+  "You're about as welcome as a bull in a china shop. Stick to SELECT statements.",
+  "Hold up! This isn't 'Destroy the Database 101'. Keep your grubby mutations to yourself.",
+  "Nope! Your query has more red flags than a communist parade. READ-ONLY means READ-ONLY!",
+  "Mutation rejected! I have commitment issues with permanent changes.",
+  "Your query is trying to be too handsy with my data. Keep it platonic with SELECT!",
+]
+
+const SYNTAX_ERROR_MSGS = [
+  "Nice try, but that's not how SQL works. Maybe try with something else?",
+  "Your query is as broken as my faith in humanity. Try again.",
+  "Even my grandmother writes better SQL than that.",
+  "I've seen better attempts from a rubber duck.",
+  "That's not SQL, that's just wishful thinking.",
+  "Nice query! Said no database ever. Try SELECT * FROM reality;",
+  "Your SQL skills need more work than a fixer-upper house.",
+]
+
+const SCHEMA: Record<string, string[]> = {
+  personal_info: ['id','name','designation','location','experience_years','email','github','linkedin','bio','created_at','updated_at'],
+  skills: ['id','category','skill','created_at','updated_at'],
+  blogs: ['id','title','published_date','category','read_time','views','url','status','created_at','updated_at'],
+  experience: ['id','company','position','start_date','end_date','description','created_at','updated_at'],
+};
+
+interface TableSource { 
+  table: string; 
+  alias: string; 
+}
+
+interface ColumnRef {
+  table?: string;
+  column: string;
+}
 
 export class DatabaseService {
-  static async getTableData(tableName: string): Promise<any[]> {
-    const { data, error } = await supabase.from(tableName).select("*")
+  static async executeQuery(sql: string): Promise<{ data: any[]; tableName: string }> {
+    try {
+      // 1) Parse and validate SQL
+      let ast: any;
+      try { 
+        ast = parser.astify(sql); 
+      } catch (error) { 
+        throw new Error(random(SYNTAX_ERROR_MSGS)); 
+      }
 
-    if (error) {
-      throw new Error(`Failed to fetch ${tableName}: ${error.message}`)
-    }
+      const stmts = Array.isArray(ast) ? ast : [ast];
+      if (stmts.length !== 1) {
+        throw new Error("One query at a time, Sherlock.");
+      }
 
-    return data || []
-  }
+      const stmt = stmts[0];
+      if (stmt.type !== 'select') {
+        throw new Error(random(MUTATION_ERROR_MSGS));
+      }
 
-  static async executeQuery(query: string): Promise<{ data: any[]; tableName: string }> {
-    this.validateReadOnlyQuery(query)
-    
-    const parsedQuery = this.parseQuery(query)
-    let data: any[] = []
-
-    // Get base data
-    data = await this.getTableData(parsedQuery.tableName)
-
-    // Apply WHERE conditions
-    if (parsedQuery.whereConditions.length > 0) {
-      data = this.applyWhereConditions(data, parsedQuery.whereConditions)
-    }
-
-    // Apply ORDER BY
-    if (parsedQuery.orderBy) {
-      data = this.applySorting(data, parsedQuery.orderBy)
-    }
-
-    // Apply LIMIT
-    if (parsedQuery.limit) {
-      data = data.slice(0, parsedQuery.limit)
-    }
-
-    // Apply column selection
-    if (parsedQuery.columns.length > 0 && !parsedQuery.columns.includes("*")) {
-      data = data.map((row) => {
-        const filteredRow: any = {}
-        parsedQuery.columns.forEach((col) => {
-          if (row.hasOwnProperty(col)) {
-            filteredRow[col] = row[col]
+      // 2) Extract table sources and validate they exist
+      const sources: TableSource[] = [];
+      if (stmt.from && stmt.from.length > 0) {
+        stmt.from.forEach((fromItem: any) => {
+          const tableName = fromItem.table;
+          if (!SCHEMA[tableName]) {
+            throw new Error(`What on earth is '${tableName}'?. Available tables: ${Object.keys(SCHEMA).join(', ')}`);
           }
-        })
-        return filteredRow
-      })
-    }
+          sources.push({ 
+            table: tableName, 
+            alias: fromItem.as || tableName 
+          });
+        });
+      } else {
+        throw new Error('Where FROM? your pocket?');
+      }
 
-    return { data, tableName: parsedQuery.tableName }
+      const mainTable = sources[0];
+
+      // 3) Build column whitelist for each table/alias
+      const aliasToColumns: Record<string, Set<string>> = {};
+      sources.forEach(source => {
+        const alias = source.alias.toLowerCase();
+        aliasToColumns[alias] = new Set(SCHEMA[source.table]);
+      });
+
+      // 4) Validate column references (skip * columns)
+      const columnRefs = this.collectColumnRefs(stmt);
+      const nonStarRefs = columnRefs.filter(ref => ref.column !== '*');
+      
+      for (const ref of nonStarRefs) {
+        const aliasToCheck = ref.table ? ref.table.toLowerCase() : mainTable.alias.toLowerCase();
+        
+        if (!aliasToColumns[aliasToCheck]) {
+          throw new Error(`Table/alias '${aliasToCheck}' not found in query.`);
+        }
+        
+        if (!aliasToColumns[aliasToCheck].has(ref.column)) {
+          const availableCols = Array.from(aliasToColumns[aliasToCheck]).join(', ');
+          throw new Error(`Column '${ref.column}' not found in table '${aliasToCheck}'. Available columns: ${availableCols}`);
+        }
+      }
+
+      // 5) Fetch data from Supabase and prefix columns
+      const tableData: Record<string, any[]> = {};
+      
+      for (const source of sources) {
+        const { data, error } = await supabase
+          .from(source.table)
+          .select('*');
+          
+        if (error) {
+          throw new Error(`Failed to fetch data from ${source.table}: ${error.message}`);
+        }
+        
+        // Prefix columns with table alias to avoid conflicts
+        const prefixedData = (data || []).map(row => {
+          const prefixedRow: any = {};
+          SCHEMA[source.table].forEach(columnName => {
+            prefixedRow[`${source.alias}.${columnName}`] = (row as any)[columnName];
+          });
+          return prefixedRow;
+        });
+        
+        tableData[source.alias] = prefixedData;
+      }
+
+      // 6) Handle JOINs
+      let resultRows = tableData[mainTable.alias] || [];
+      
+      for (let i = 1; i < sources.length; i++) {
+        const rightSource = sources[i];
+        const joinClause = stmt.from[i];
+        const rightData = tableData[rightSource.alias];
+        
+        const joinedRows: any[] = [];
+        
+        for (const leftRow of resultRows) {
+          for (const rightRow of rightData) {
+            const combinedRow = { ...leftRow, ...rightRow };
+            
+            // Apply JOIN condition if exists
+            if (joinClause.on) {
+              if (this.evaluateExpression(joinClause.on, combinedRow, mainTable)) {
+                joinedRows.push(combinedRow);
+              }
+            } else {
+              // CROSS JOIN if no ON condition
+              joinedRows.push(combinedRow);
+            }
+          }
+        }
+        
+        resultRows = joinedRows;
+      }
+
+      // 7) Apply WHERE clause
+      if (stmt.where) {
+        console.log(stmt.where)
+        resultRows = resultRows.filter(row => 
+          this.evaluateExpression(stmt.where, row, mainTable)
+        );
+      }
+
+      // 8) Handle GROUP BY and aggregations
+      let processedRows = resultRows;
+      
+      if (stmt.groupby && stmt.groupby.length > 0) {
+        const groupMap = new Map<string, any[]>();
+        
+        // Group rows by GROUP BY columns
+        for (const row of resultRows) {
+          const groupKey = stmt.groupby.map((col: any) => {
+            const key = `${col.table || mainTable.alias}.${col.column}`;
+            return row[key];
+          }).join('|');
+          
+          if (!groupMap.has(groupKey)) {
+            groupMap.set(groupKey, []);
+          }
+          groupMap.get(groupKey)!.push(row);
+        }
+        
+        // Process each group
+        processedRows = [];
+        for (const group of groupMap.values()) {
+          const groupRow: any = {};
+          
+          // Process each selected column/expression
+          if (stmt.columns) {
+            for (const col of stmt.columns) {
+              const isStarColumn = col.expr.type === 'star' || 
+                                 col.expr.column === '*' || 
+                                 (col.expr.type === 'column_ref' && col.expr.column === '*');
+              
+              if (isStarColumn) {
+                // SELECT * in GROUP BY - include all non-aggregate columns from main table
+                SCHEMA[mainTable.table].forEach(columnName => {
+                  const key = `${mainTable.alias}.${columnName}`;
+                  groupRow[columnName] = group[0][key]; // Take first value for non-aggregate columns
+                });
+              } else if (col.expr.type === 'aggr_func') {
+                const alias = col.as || col.expr.name || 'result';
+                groupRow[alias] = this.calculateAggregate(col.expr, group, mainTable);
+              } else if (col.expr.type === 'column_ref') {
+                const alias = col.as || col.expr.column;
+                const key = `${col.expr.table || mainTable.alias}.${col.expr.column}`;
+                groupRow[alias] = group[0][key]; // Take first value for non-aggregate columns
+              }
+            }
+          }
+          
+          processedRows.push(groupRow);
+        }
+      }
+
+      // 9) Apply HAVING clause
+      if (stmt.having) {
+        processedRows = processedRows.filter(row => 
+          this.evaluateExpression(stmt.having, row, mainTable)
+        );
+      }
+
+      // 10) Apply ORDER BY
+      if (stmt.orderby && stmt.orderby.length > 0) {
+        processedRows.sort((a, b) => {
+          for (const orderCol of stmt.orderby) {
+            const key = orderCol.expr.table 
+              ? `${orderCol.expr.table}.${orderCol.expr.column}`
+              : `${mainTable.alias}.${orderCol.expr.column}`;
+            
+            const aVal = a[key];
+            const bVal = b[key];
+            const direction = orderCol.type === 'DESC' ? -1 : 1;
+            
+            if (aVal < bVal) return -1 * direction;
+            if (aVal > bVal) return 1 * direction;
+          }
+          return 0;
+        });
+      }
+
+      // 11) Apply LIMIT
+      if (stmt.limit) {
+        const limitValue = typeof stmt.limit === 'object' ? stmt.limit.value : stmt.limit;
+        processedRows = processedRows.slice(0, Number(limitValue));
+      }
+
+      // 12) Final projection
+      let finalRows = processedRows;
+      
+      if (stmt.columns && stmt.columns.length > 0) {
+        finalRows = processedRows.map(row => {
+          const projectedRow: any = {};
+          
+          for (const col of stmt.columns) {
+            // Check for different star representations
+            const isStarColumn = col.expr.type === 'star' || 
+                               col.expr.column === '*' || 
+                               (col.expr.type === 'column_ref' && col.expr.column === '*');
+            
+            if (isStarColumn) {
+              // SELECT * - include all columns from main table (without prefix)
+              SCHEMA[mainTable.table].forEach(columnName => {
+                projectedRow[columnName] = row[`${mainTable.alias}.${columnName}`];
+              });
+            } else if (col.expr.type === 'column_ref') {
+              const alias = col.as || col.expr.column;
+              const key = `${col.expr.table || mainTable.alias}.${col.expr.column}`;
+              projectedRow[alias] = row[key];
+            } else if (col.expr.type === 'aggr_func') {
+              const alias = col.as || col.expr.name || 'result';
+              projectedRow[alias] = row[alias];
+            }
+          }
+          
+          return projectedRow;
+        });
+      } else {
+        // If no columns specified, default to SELECT *
+        finalRows = processedRows.map(row => {
+          const projectedRow: any = {};
+          SCHEMA[mainTable.table].forEach(columnName => {
+            projectedRow[columnName] = row[`${mainTable.alias}.${columnName}`];
+          });
+          return projectedRow;
+        });
+      }
+
+      if (finalRows.length === 0) {
+        throw new Error("Ah! Maybe you are searching the worng thing at the right place.");
+      }
+
+      return { 
+        data: finalRows, 
+        tableName: mainTable.table 
+      };
+
+    } catch (error) {
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw new Error(random(SYNTAX_ERROR_MSGS));
+    }
   }
 
-  private static validateReadOnlyQuery(queryString: string): void {
-    const trimmedQuery = queryString.trim().toLowerCase()
+  static async getTableCounts(): Promise<Record<string, number>> {
+    const counts: Record<string, number> = {};
     
-    // List of forbidden mutation keywords
-    const mutationKeywords = [
-      'insert', 'update', 'delete', 'drop', 'create', 'alter', 
-      'truncate', 'replace', 'merge', 'upsert', 'grant', 'revoke',
-      'commit', 'rollback', 'savepoint', 'set', 'declare', 'exec',
-      'execute', 'call', 'pragma', 'begin', 'transaction'
-    ]
-
-    // Sarcastic error messages for mutation attempts
-    const mutationErrors = [
-      "Whoa there, cowboy! This is a READ-ONLY zone. Your destructive tendencies are not welcome here.",
-      "Nice try, data destroyer! This isn't a playground where you can break things. SELECT only, please.",
-      "ERROR: Mutation detected! I'm not your personal database demolition crew.",
-      "Access Denied: You're about as welcome as a bull in a china shop. Stick to SELECT statements.",
-      "Hold up! This isn't 'Destroy the Database 101'. Keep your grubby mutations to yourself.",
-      "Mutation Alert! 🚨 I don't do destruction, only construction... of result sets.",
-      "Nope! Your query has more red flags than a communist parade. READ-ONLY means READ-ONLY!",
-      "Error 403: Forbidden. I'm a data reader, not a data wrecker. Try a SELECT statement instead.",
-      "Mutation rejected! I have commitment issues with permanent changes.",
-      "Access Violation: Your query is trying to be too handsy with my data. Keep it platonic with SELECT!",
-    ]
-
-    // Check for mutation keywords
-    for (const keyword of mutationKeywords) {
-      // Use word boundaries to avoid false positives (e.g., 'insert' in 'insertion_date')
-      const regex = new RegExp(`\\b${keyword}\\b`, 'i')
-      if (regex.test(trimmedQuery)) {
-        throw new Error(mutationErrors[Math.floor(Math.random() * mutationErrors.length)])
-      }
-    }
-
-    // Additional checks for sneaky attempts
-    if (trimmedQuery.includes(';') && trimmedQuery.split(';').length > 2) {
-      throw new Error("Multiple statements detected! What are you trying to pull here? One SELECT at a time, buddy.")
-    }
-
-    // Check for comment-based injection attempts
-    if (trimmedQuery.includes('--') || trimmedQuery.includes('/*') || trimmedQuery.includes('*/')) {
-      throw new Error("Comments in queries? How suspicious! I don't trust you anymore. Clean SELECT only.")
-    }
-
-    // Check for union-based attempts to bypass restrictions
-    if (trimmedQuery.includes('union') && !trimmedQuery.match(/^select.*union.*select/)) {
-      throw new Error("UNION detected! Are you trying to be clever? This isn't SQL injection 101, amateur.")
-    }
-  }
-
-  private static parseQuery(queryString: string) {
-    const trimmedQuery = queryString.trim().toLowerCase()
-    const sarcasticErrors = [
-      "Nice try, but that's not how SQL works. Maybe try a SELECT statement?",
-      "ERROR: Your query is as broken as my faith in humanity. Try again.",
-      "Syntax Error: Even my grandmother writes better SQL than that.",
-      "Invalid Query: I've seen better attempts from a rubber duck.",
-      "Query Failed: That's not SQL, that's just wishful thinking.",
-      "Error 404: Valid SQL syntax not found in your query.",
-      "Nice query! Said no database ever. Try SELECT * FROM reality;",
-      "Your SQL skills need more work than a fixer-upper house.",
-    ]
-
-    // Basic SQL query validation
-    if (!trimmedQuery.startsWith("select")) {
-      throw new Error(sarcasticErrors[Math.floor(Math.random() * sarcasticErrors.length)])
-    }
-
-    // Extract columns
-    const selectMatch = trimmedQuery.match(/select\s+(.*?)\s+from/)
-    const columns = selectMatch ? selectMatch[1].split(",").map((col) => col.trim()) : ["*"]
-
-    // Extract table name
-    const fromMatch = trimmedQuery.match(/from\s+(\w+)/)
-    if (!fromMatch) {
-      throw new Error("FROM clause missing. Where exactly do you want me to get this data from, thin air?")
-    }
-
-    const tableName = fromMatch[1]
-    const validTables = ["personal_info", "skills", "blogs", "experience"]
-
-    if (!validTables.includes(tableName)) {
-      throw new Error(`Table '${tableName}' doesn't exist. Try one of: ${validTables.join(", ")}`)
-    }
-
-    // Parse WHERE conditions
-    const whereConditions: Array<{ field: string; operator: string; value: string }> = []
-    const whereMatch = trimmedQuery.match(/where\s+(.+?)(?:\s+order\s+by|\s+limit|$)/)
-    if (whereMatch) {
-      const whereClause = whereMatch[1]
-      // Simple parsing for basic conditions
-      const conditionRegex = /(\w+)\s*(=|!=|>|<|>=|<=)\s*['"](.*?)['"]|(\w+)\s*(=|!=|>|<|>=|<=)\s*(\d+)/g
-      let match
-      while ((match = conditionRegex.exec(whereClause)) !== null) {
-        if (match[1]) {
-          whereConditions.push({
-            field: match[1],
-            operator: match[2],
-            value: match[3],
-          })
-        } else if (match[4]) {
-          whereConditions.push({
-            field: match[4],
-            operator: match[5],
-            value: match[6],
-          })
-        }
-      }
-    }
-
-    // Parse ORDER BY
-    let orderBy: { field: string; direction: "asc" | "desc" } | null = null
-    const orderMatch = trimmedQuery.match(/order\s+by\s+(\w+)(?:\s+(asc|desc))?/)
-    if (orderMatch) {
-      orderBy = {
-        field: orderMatch[1],
-        direction: (orderMatch[2] as "asc" | "desc") || "asc",
-      }
-    }
-
-    // Parse LIMIT
-    let limit: number | null = null
-    const limitMatch = trimmedQuery.match(/limit\s+(\d+)/)
-    if (limitMatch) {
-      limit = Number.parseInt(limitMatch[1])
-    }
-
-    return {
-      columns,
-      tableName,
-      whereConditions,
-      orderBy,
-      limit,
-    }
-  }
-
-  private static applyWhereConditions(
-    data: any[],
-    conditions: Array<{ field: string; operator: string; value: string }>,
-  ) {
-    return data.filter((row) => {
-      return conditions.every((condition) => {
-        const fieldValue = row[condition.field]
-        const conditionValue = condition.value
-
-        switch (condition.operator) {
-          case "=":
-            return String(fieldValue).toLowerCase() === conditionValue.toLowerCase()
-          case "!=":
-            return String(fieldValue).toLowerCase() !== conditionValue.toLowerCase()
-          case ">":
-            return Number(fieldValue) > Number(conditionValue)
-          case "<":
-            return Number(fieldValue) < Number(conditionValue)
-          case ">=":
-            return Number(fieldValue) >= Number(conditionValue)
-          case "<=":
-            return Number(fieldValue) <= Number(conditionValue)
-          default:
-            return true
-        }
-      })
-    })
-  }
-
-  private static applySorting(data: any[], orderBy: { field: string; direction: "asc" | "desc" }) {
-    return [...data].sort((a, b) => {
-      let aVal = a[orderBy.field]
-      let bVal = b[orderBy.field]
-
-      // Handle dates
-      if (orderBy.field.includes("date")) {
-        aVal = new Date(aVal || "1900-01-01").getTime()
-        bVal = new Date(bVal || "1900-01-01").getTime()
-      }
-
-      // Handle numbers
-      if (typeof aVal === "number" && typeof bVal === "number") {
-        return orderBy.direction === "desc" ? bVal - aVal : aVal - bVal
-      }
-
-      // Handle strings
-      const comparison = String(aVal).localeCompare(String(bVal))
-      return orderBy.direction === "desc" ? -comparison : comparison
-    })
-  }
-
-  static async getTableCounts() {
-    const tables = ["personal_info", "skills", "blogs", "experience"]
-    const counts: Record<string, number> = {}
-
-    for (const table of tables) {
+    for (const tableName of Object.keys(SCHEMA)) {
       try {
-        const { count } = await supabase.from(table).select("*", { count: "exact", head: true })
-        counts[table] = count || 0
+        const { count, error } = await supabase
+          .from(tableName)
+          .select('*', { count: 'exact', head: true });
+          
+        counts[tableName] = error ? 0 : (count || 0);
       } catch (error) {
-        counts[table] = 0
+        counts[tableName] = 0;
       }
     }
-
-    return counts
+    
+    return counts;
   }
+
+  // Helper methods
+  private static collectColumnRefs(node: any): ColumnRef[] {
+    const refs: ColumnRef[] = [];
+    
+    if (!node || typeof node !== 'object') {
+      return refs;
+    }
+    
+    if (node.type === 'column_ref') {
+      refs.push({
+        table: node.table,
+        column: node.column
+      });
+    }
+    
+    // Recursively search for column references
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          refs.push(...this.collectColumnRefs(item));
+        }
+      } else if (value && typeof value === 'object') {
+        refs.push(...this.collectColumnRefs(value));
+      }
+    }
+    
+    return refs;
+  }
+
+  private static evaluateExpression(expr: any, row: Record<string, any>, mainTable: TableSource): any {
+    if (!expr) return true;
+    
+    switch (expr.type) {
+      case 'binary_expr':
+        const left = this.evaluateExpression(expr.left, row, mainTable);
+        const right = this.evaluateExpression(expr.right, row, mainTable);
+        
+        switch (expr.operator.toUpperCase()) {
+          case '=': return left == right;
+          case '!=':
+          case '<>': return left != right;
+          case '>': return left > right;
+          case '<': return left < right;
+          case '>=': return left >= right;
+          case '<=': return left <= right;
+          case 'AND': return Boolean(left) && Boolean(right);
+          case 'OR': return Boolean(left) || Boolean(right);
+          case 'LIKE':
+            const pattern = right.toString().replace(/%/g, '.*').replace(/_/g, '.');
+            return new RegExp(`^${pattern}$`, 'i').test(left.toString());
+          case 'IN':
+            // Handle IN clause - right should be an array of values
+            if (Array.isArray(right)) {
+              return right.some(val => val == left);
+            }
+            return false;
+          case 'NOT IN':
+            // Handle NOT IN clause
+            if (Array.isArray(right)) {
+              return !right.some(val => val == left);
+            }
+            return true;
+          default: return false;
+        }
+        
+      case 'column_ref':
+        // Fix: Use main table alias when table is null
+        const key = expr.table ? `${expr.table}.${expr.column}` : `${mainTable.alias}.${expr.column}`;
+        console.log(`Column lookup: ${key}, available keys:`, Object.keys(row));
+        return row[key];
+        
+      case 'number':
+        return Number(expr.value);
+        
+      case 'string':
+        return expr.value;
+        
+      case 'single_quote_string':
+        return expr.value;
+        
+      case 'bool':
+        return Boolean(expr.value);
+        
+      case 'expr_list':
+        // Handle lists for IN clauses
+        return expr.value.map((item: any) => this.evaluateExpression(item, row, mainTable));
+        
+      case 'unary_expr':
+        const operand = this.evaluateExpression(expr.expr, row, mainTable);
+        switch (expr.operator.toUpperCase()) {
+          case 'NOT': return !Boolean(operand);
+          case '-': return -Number(operand);
+          case '+': return +Number(operand);
+          default: return operand;
+        }
+        
+      default:
+        return null;
+    }
+  }
+
+  private static calculateAggregate(aggr: any, group: any[], mainTable: TableSource): any {
+    const funcName = aggr.name.toLowerCase();
+    
+    if (funcName === 'count') {
+      if (aggr.args.expr.column === '*') {
+        return group.length;
+      }
+      
+      const columnKey = `${aggr.args.expr.table || mainTable.alias}.${aggr.args.expr.column}`;
+      const values = group.map(row => row[columnKey]).filter(val => val != null);
+      return values.length;
+    }
+    
+    const columnKey = `${aggr.args.expr.table || mainTable.alias}.${aggr.args.expr.column}`;
+    const numericValues = group
+      .map(row => row[columnKey])
+      .filter(val => val != null && !isNaN(Number(val)))
+      .map(val => Number(val));
+    
+    if (numericValues.length === 0) return null;
+    
+    switch (funcName) {
+      case 'sum':
+        return numericValues.reduce((sum, val) => sum + val, 0);
+      case 'avg':
+        return numericValues.reduce((sum, val) => sum + val, 0) / numericValues.length;
+      case 'min':
+        return Math.min(...numericValues);
+      case 'max':
+        return Math.max(...numericValues);
+      default:
+        return null;
+    }
+  }
+}
+
+// Helper function
+function random(arr: string[]): string { 
+  return arr[Math.floor(Math.random() * arr.length)]; 
 }

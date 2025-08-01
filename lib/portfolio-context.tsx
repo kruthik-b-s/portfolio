@@ -31,7 +31,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<PortfolioState>({
     queryResults: {},
     queryHistory: [],
-    currentQuery: "SELECT * FROM personal_info;",
+    currentQuery: "SELECT name, designation, email, github, linkedin FROM personal_info;",
     showResults: {},
     error: {},
   })

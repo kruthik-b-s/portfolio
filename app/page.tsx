@@ -13,7 +13,6 @@ import {
   History,
   Menu,
   Database,
-  PanelRightOpen,
   X
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -97,16 +96,16 @@ function SQLPortfolioContent() {
     let defaultQuery = ""
     switch (tableName) {
       case "personal_info":
-        defaultQuery = "SELECT * FROM personal_info;"
+        defaultQuery = "SELECT name, designation, email, github, linkedin FROM personal_info;"
         break
       case "skills":
-        defaultQuery = "SELECT * FROM skills ORDER BY proficiency DESC;"
+        defaultQuery = "SELECT category, skill FROM skills ORDER BY updated_at DESC;"
         break
       case "blogs":
         defaultQuery = "SELECT * FROM blogs ORDER BY published_date DESC;"
         break
       case "experience":
-        defaultQuery = "SELECT * FROM experience ORDER BY start_date DESC;"
+        defaultQuery = "SELECT company, position, start_date as \"from\", end_date as \"to\" FROM experience ORDER BY start_date DESC;"
         break
     }
     setCurrentQuery(defaultQuery)
@@ -253,9 +252,9 @@ function SQLPortfolioContent() {
             onClick={() => setIsMobileSidebarOpen(false)}
             size="sm"
             variant="ghost"
-            className="lg:hidden absolute bottom-4 right-2 text-gray-400 hover:text-gray-100 hover:bg-gray-800"
+            className="lg:hidden absolute top-4 right-3 text-gray-400 hover:text-gray-100 hover:bg-transparent"
           >
-            <PanelRightOpen className="w-4 h-4" />
+            <X className="w-4 h-4" />
           </Button>
 
           {/* Header in sidebar */}
@@ -267,7 +266,7 @@ function SQLPortfolioContent() {
                 <div className="flex items-center">
                   <h1 className="text-lg font-bold text-green-400 font-mono">Kruthik BS</h1>
                 </div>
-                <p className="text-xs text-gray-400">Full Stack Developer</p>
+                <p className="text-xs text-gray-400">Software Engineer</p>
               </div>
             </div>
             {/* Connection Status */}
@@ -319,7 +318,7 @@ function SQLPortfolioContent() {
               <button
                 onClick={() =>
                   handleQuickQuery(
-                    "SELECT skill FROM skills WHERE category = 'Backend';",
+                    "SELECT skill FROM skills WHERE category IN ('Backend', 'Database', 'Cloud', 'DevOps');",
                     "skills",
                   )
                 }
@@ -335,7 +334,7 @@ function SQLPortfolioContent() {
               </button>
               <button
                 onClick={() =>
-                  handleQuickQuery("SELECT company, position, start_date, end_date FROM experience ORDER BY start_date DESC;", "experience")
+                  handleQuickQuery("SELECT company, position, start_date as \"from\", end_date as \"to\" FROM experience ORDER BY start_date DESC;", "experience")
                 }
                 className="block w-full text-left p-2 rounded bg-gray-800 hover:bg-gray-700 hover:text-gray-100 text-gray-300 font-mono"
               >
@@ -379,7 +378,7 @@ function SQLPortfolioContent() {
                 <div className="flex items-center">
                   <h1 className="text-sm font-bold text-green-400">Kruthik BS</h1>
                 </div>
-                <p className="text-xs text-gray-400">Full Stack Developer</p>
+                <p className="text-xs text-gray-400">Software Engineer</p>
               </div>
             </div>
             <Button
@@ -399,8 +398,10 @@ function SQLPortfolioContent() {
                 <div className="text-sm font-mono text-gray-300 leading-relaxed">
                   <p className="text-green-400">Welcome to my portfolio database!</p>
                   <br />
-                  This idea is something that crossed my mind when i was finding a theme for my portfolio. 
-                  <br /> Go ahead and give it a try!!!
+                  Go ahead and execute the queries as you like and let me know what you felt.
+                  <br /> This is something i'll continuously be working to improve, if you stumble upon something that is not working or any suggestions, i am always open.
+                  <br />
+                  <br /> For individuals who are new to SQL, feel free to wonder around or try out the quick queries.
                 </div>
                 <div className="inline-flex">
                   <AlertDescription className="mt-1">
@@ -461,7 +462,7 @@ function SQLPortfolioContent() {
                   }}
                 />
                 <div className="text-xs text-gray-500 mt-2">
-                  Press Ctrl+Enter to execute • Supports SELECT, WHERE, ORDER BY, LIMIT
+                  Press Ctrl+Enter to execute • Supports only SELECT queries
                 </div>
               </div>
             </div>
