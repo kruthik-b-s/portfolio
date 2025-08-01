@@ -44,9 +44,9 @@ interface ColumnRef {
 export class DatabaseService {
   static async executeQuery(sql: string): Promise<{ data: any[]; tableName: string }> {
     try {
-      // 1) Parse and validate SQL
       let ast: any;
       try { 
+        // Parse the incoming SQL query into as AST (tree obj)
         ast = parser.astify(sql); 
       } catch (error) { 
         throw new Error(random(SYNTAX_ERROR_MSGS)); 
@@ -62,7 +62,6 @@ export class DatabaseService {
         throw new Error(random(MUTATION_ERROR_MSGS));
       }
 
-      // 2) Extract table sources and validate they exist
       const sources: TableSource[] = [];
       if (stmt.from && stmt.from.length > 0) {
         stmt.from.forEach((fromItem: any) => {
@@ -81,14 +80,13 @@ export class DatabaseService {
 
       const mainTable = sources[0];
 
-      // 3) Build column whitelist for each table/alias
+      // Handle alias to column names
       const aliasToColumns: Record<string, Set<string>> = {};
       sources.forEach(source => {
         const alias = source.alias.toLowerCase();
         aliasToColumns[alias] = new Set(SCHEMA[source.table]);
       });
 
-      // 4) Validate column references (skip * columns)
       const columnRefs = this.collectColumnRefs(stmt);
       const nonStarRefs = columnRefs.filter(ref => ref.column !== '*');
       
@@ -105,10 +103,10 @@ export class DatabaseService {
         }
       }
 
-      // 5) Fetch data from Supabase and prefix columns
       const tableData: Record<string, any[]> = {};
       
       for (const source of sources) {
+        // Fetch all the data from the table at once
         const { data, error } = await supabase
           .from(source.table)
           .select('*');
@@ -117,7 +115,6 @@ export class DatabaseService {
           throw new Error(`Failed to fetch data from ${source.table}: ${error.message}`);
         }
         
-        // Prefix columns with table alias to avoid conflicts
         const prefixedData = (data || []).map(row => {
           const prefixedRow: any = {};
           SCHEMA[source.table].forEach(columnName => {
@@ -129,9 +126,9 @@ export class DatabaseService {
         tableData[source.alias] = prefixedData;
       }
 
-      // 6) Handle JOINs
       let resultRows = tableData[mainTable.alias] || [];
       
+      // Handle join queries
       for (let i = 1; i < sources.length; i++) {
         const rightSource = sources[i];
         const joinClause = stmt.from[i];
@@ -143,13 +140,11 @@ export class DatabaseService {
           for (const rightRow of rightData) {
             const combinedRow = { ...leftRow, ...rightRow };
             
-            // Apply JOIN condition if exists
             if (joinClause.on) {
               if (this.evaluateExpression(joinClause.on, combinedRow, mainTable)) {
                 joinedRows.push(combinedRow);
               }
             } else {
-              // CROSS JOIN if no ON condition
               joinedRows.push(combinedRow);
             }
           }
@@ -158,7 +153,7 @@ export class DatabaseService {
         resultRows = joinedRows;
       }
 
-      // 7) Apply WHERE clause
+      // Evaluate where conditions
       if (stmt.where) {
         console.log(stmt.where)
         resultRows = resultRows.filter(row => 
@@ -166,13 +161,12 @@ export class DatabaseService {
         );
       }
 
-      // 8) Handle GROUP BY and aggregations
       let processedRows = resultRows;
       
+      // Handle group by clause
       if (stmt.groupby && stmt.groupby.length > 0) {
         const groupMap = new Map<string, any[]>();
         
-        // Group rows by GROUP BY columns
         for (const row of resultRows) {
           const groupKey = stmt.groupby.map((col: any) => {
             const key = `${col.table || mainTable.alias}.${col.column}`;
@@ -185,12 +179,10 @@ export class DatabaseService {
           groupMap.get(groupKey)!.push(row);
         }
         
-        // Process each group
         processedRows = [];
         for (const group of groupMap.values()) {
           const groupRow: any = {};
           
-          // Process each selected column/expression
           if (stmt.columns) {
             for (const col of stmt.columns) {
               const isStarColumn = col.expr.type === 'star' || 
@@ -198,10 +190,9 @@ export class DatabaseService {
                                  (col.expr.type === 'column_ref' && col.expr.column === '*');
               
               if (isStarColumn) {
-                // SELECT * in GROUP BY - include all non-aggregate columns from main table
                 SCHEMA[mainTable.table].forEach(columnName => {
                   const key = `${mainTable.alias}.${columnName}`;
-                  groupRow[columnName] = group[0][key]; // Take first value for non-aggregate columns
+                  groupRow[columnName] = group[0][key];
                 });
               } else if (col.expr.type === 'aggr_func') {
                 const alias = col.as || col.expr.name || 'result';
@@ -209,7 +200,7 @@ export class DatabaseService {
               } else if (col.expr.type === 'column_ref') {
                 const alias = col.as || col.expr.column;
                 const key = `${col.expr.table || mainTable.alias}.${col.expr.column}`;
-                groupRow[alias] = group[0][key]; // Take first value for non-aggregate columns
+                groupRow[alias] = group[0][key];
               }
             }
           }
@@ -218,14 +209,14 @@ export class DatabaseService {
         }
       }
 
-      // 9) Apply HAVING clause
+      // Handle having clause
       if (stmt.having) {
         processedRows = processedRows.filter(row => 
           this.evaluateExpression(stmt.having, row, mainTable)
         );
       }
 
-      // 10) Apply ORDER BY
+      // Handle order by clause
       if (stmt.orderby && stmt.orderby.length > 0) {
         processedRows.sort((a, b) => {
           for (const orderCol of stmt.orderby) {
@@ -244,13 +235,12 @@ export class DatabaseService {
         });
       }
 
-      // 11) Apply LIMIT
+      // Handle limit
       if (stmt.limit) {
-        const limitValue = typeof stmt.limit === 'object' ? stmt.limit.value : stmt.limit;
+        const limitValue = typeof stmt.limit === 'object' ? stmt.limit.value[0].value : stmt.limit;
         processedRows = processedRows.slice(0, Number(limitValue));
       }
 
-      // 12) Final projection
       let finalRows = processedRows;
       
       if (stmt.columns && stmt.columns.length > 0) {
@@ -258,13 +248,11 @@ export class DatabaseService {
           const projectedRow: any = {};
           
           for (const col of stmt.columns) {
-            // Check for different star representations
             const isStarColumn = col.expr.type === 'star' || 
                                col.expr.column === '*' || 
                                (col.expr.type === 'column_ref' && col.expr.column === '*');
             
             if (isStarColumn) {
-              // SELECT * - include all columns from main table (without prefix)
               SCHEMA[mainTable.table].forEach(columnName => {
                 projectedRow[columnName] = row[`${mainTable.alias}.${columnName}`];
               });
@@ -281,7 +269,6 @@ export class DatabaseService {
           return projectedRow;
         });
       } else {
-        // If no columns specified, default to SELECT *
         finalRows = processedRows.map(row => {
           const projectedRow: any = {};
           SCHEMA[mainTable.table].forEach(columnName => {
@@ -292,7 +279,7 @@ export class DatabaseService {
       }
 
       if (finalRows.length === 0) {
-        throw new Error("Ah! Maybe you are searching the worng thing at the right place.");
+        throw new Error("Ah! Maybe you are searching the worng thing at the right place. (Found nothing for this!");
       }
 
       return { 
@@ -326,7 +313,6 @@ export class DatabaseService {
     return counts;
   }
 
-  // Helper methods
   private static collectColumnRefs(node: any): ColumnRef[] {
     const refs: ColumnRef[] = [];
     
@@ -341,7 +327,6 @@ export class DatabaseService {
       });
     }
     
-    // Recursively search for column references
     for (const value of Object.values(node)) {
       if (Array.isArray(value)) {
         for (const item of value) {
@@ -377,13 +362,11 @@ export class DatabaseService {
             const pattern = right.toString().replace(/%/g, '.*').replace(/_/g, '.');
             return new RegExp(`^${pattern}$`, 'i').test(left.toString());
           case 'IN':
-            // Handle IN clause - right should be an array of values
             if (Array.isArray(right)) {
               return right.some(val => val == left);
             }
             return false;
           case 'NOT IN':
-            // Handle NOT IN clause
             if (Array.isArray(right)) {
               return !right.some(val => val == left);
             }
@@ -392,7 +375,6 @@ export class DatabaseService {
         }
         
       case 'column_ref':
-        // Fix: Use main table alias when table is null
         const key = expr.table ? `${expr.table}.${expr.column}` : `${mainTable.alias}.${expr.column}`;
         console.log(`Column lookup: ${key}, available keys:`, Object.keys(row));
         return row[key];
@@ -410,7 +392,6 @@ export class DatabaseService {
         return Boolean(expr.value);
         
       case 'expr_list':
-        // Handle lists for IN clauses
         return expr.value.map((item: any) => this.evaluateExpression(item, row, mainTable));
         
       case 'unary_expr':
@@ -463,7 +444,6 @@ export class DatabaseService {
   }
 }
 
-// Helper function
 function random(arr: string[]): string { 
   return arr[Math.floor(Math.random() * arr.length)]; 
 }
