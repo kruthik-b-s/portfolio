@@ -199,7 +199,7 @@ function SQLPortfolioContent() {
                   <tr key={index} className="border-b border-gray-700 hover:bg-gray-800/30">
                     {columns.map((col) => (
                       <td key={col} className="p-2 sm:p-3 text-gray-300 max-w-xs">
-                        {col === "url" && row[col] ? (
+                        {(col === "github" || col === "linkedin") && row[col] ? (
                           <a
                             href={row[col]}
                             className="text-blue-400 hover:underline break-all"
@@ -208,8 +208,6 @@ function SQLPortfolioContent() {
                           >
                             {row[col]}
                           </a>
-                        ) : col === "proficiency" && typeof row[col] === "number" ? (
-                          `${row[col]}%`
                         ) : col === "description" || col === "bio" ? (
                           <div className="max-w-xs truncate" title={String(row[col] || "NULL")}>
                             {String(row[col] || "NULL")}
