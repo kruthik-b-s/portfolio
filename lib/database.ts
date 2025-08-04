@@ -279,7 +279,7 @@ export class DatabaseService {
       }
 
       if (finalRows.length === 0) {
-        throw new Error("Ah! Maybe you are searching the worng thing at the right place. (Found nothing for this!");
+        throw new Error("Ah! Maybe you are searching the worng thing at the right place. (Found nothing for this!)");
       }
 
       return { 
