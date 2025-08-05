@@ -492,13 +492,13 @@ function SQLPortfolioContent() {
               ) : (
                 <div className="text-center py-8">
                   <Database className="w-16 h-16 text-gray-600 mx-auto mb-4" />
-                  <h3 className="text-lg font-semibold text-gray-400 mb-2">Welcome to My Portfolio Database</h3>
+                  <h3 className="text-lg font-semibold text-gray-400 mb-2">My Portfolio Database</h3>
                   <p className="text-gray-500 mb-4">
                     Execute a query to explore my professional data. Try clicking on a table or use the quick queries.
                   </p>
                   <div className="text-sm text-gray-600 font-mono">
                     <p>Available tables: personal_info, skills, blogs, experience</p>
-                    <p>Supported: SELECT, WHERE, ORDER BY, LIMIT</p>
+                    <p>{'Supported queries: SELECT (only) with WHERE, ORDER BY, LIMIT'}</p>
                   </div>
                 </div>
               )}
